@@ -1,0 +1,28 @@
+[package]
+name = "shary"
+version = "0.1.0"
+authors = ["kennytm <kennytm@gmail.com>"]
+edition = "2018"
+description = "HTTP server for sharing files and text snippets in LAN"
+exclude = ["minimize.sh", "src/web/index.html"]
+license = "MIT"
+homepage = "https://github.com/kennytm/shary"
+repository = "https://github.com/kennytm/shary"
+readme = "README.md"
+keywords = ["file-sharing"]
+
+[dependencies]
+async-ctrlc = "1.0.0"
+async-std = { version = "1.4.0", default-features = false, features = ["unstable"] }
+futures-util = "0.3.1"
+get_if_addrs = "0.5.3"
+hostname = "0.3.0"
+mime = "0.3.14"
+serde = { version = "1.0.104", features = ["derive"] }
+structopt = "0.3.5"
+tempfile = "3.1.0"
+tide = "0.5.1"
+qrcode = { version = "0.11.0", default-features = false, features = ["svg"] }
+
+[features]
+read_index_html_from_file_system = []

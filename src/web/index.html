@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+        <meta name="apple-mobile-web-app-capable" content="yes"/>
+        <title>Shary</title>
+        <style>
+            html, button {
+                font: 12pt sans-serif;
+            }
+            button {
+                background: none;
+                border-style: none;
+                cursor: pointer;
+                padding: 0;
+            }
+            #show-ip {
+                position: absolute;
+                top: 0rem;
+                right: 0rem;
+                width: 2rem;
+                height: 2rem;
+            }
+            #items {
+                position: relative;
+                margin: auto;
+                top: 2rem;
+                width: 18rem;
+            }
+            .item {
+                position: relative;
+                border: 1px solid;
+                border-radius: 0.25rem;
+                height: 2.5rem;
+                width: 18rem;
+                margin-top: 0.5rem;
+                overflow: hidden;
+            }
+            .file, .file.item > button {
+                border-color: #ccf;
+                background: #eef;
+            }
+            .password, .password.item > button {
+                border-color: #fcc;
+                background: #fee;
+            }
+            .text, .text.item > button {
+                border-color: #0e8;
+                background: #cfd;
+            }
+            .empty {
+                border-color: #ddd;
+                background: #fff;
+            }
+            .item > p {
+                position: absolute;
+                overflow: hidden;
+                white-space: nowrap;
+                top: 0.5rem;
+                left: 0.5rem;
+                min-width: 15rem;
+                height: 1.5rem;
+                margin: 0;
+                line-height: 1.5rem;
+            }
+            .file.item > p {
+                font-style: italic;
+                left: inherit;
+                right: 2.5rem;
+            }
+            .item > button {
+                position: absolute;
+                top: 0;
+                right: 0;
+                width: 2.5rem;
+                height: 2.5rem;
+            }
+            #upload-bar {
+                position: absolute;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                text-align: center;
+            }
+            #upload-bar > button {
+                width: 6rem;
+                height: 2.5rem;
+                margin: 0;
+            }
+            #upload-file {
+                background: #eef;
+            }
+            #upload-text {
+                background: #cfd;
+            }
+            #upload-password {
+                background: #fee;
+            }
+            .popup {
+                position: absolute;
+                left: 0;
+                top: 0;
+                right: 0;
+                bottom: 0;
+                padding: 1rem;
+                background: rgba(0, 0, 0, 0.9);
+                color: #fff;
+                text-align: center;
+                display: none;
+            }
+            .popup button {
+                text-transform: uppercase;
+                width: 45%;
+                height: 3rem;
+            }
+            .cancel {
+                color: #ddd;
+                background: #333;
+            }
+            #upload-text-confirm {
+                color: #cfd;
+                background: #031;
+            }
+            #upload-password-confirm {
+                color: #fee;
+                background: #500;
+            }
+            #password-warning {
+                font-size: 0.75em;
+                color: #ed5;
+            }
+            #text-snippet, #password-snippet {
+                width: 100%;
+            }
+            #copied-message {
+                position: absolute;
+                top: 0;
+                left: -12rem;
+                padding: 0.25rem;
+                width: 10rem;
+                background: #0a0;
+                color: #fff;
+                border-radius: 0 0 0.5rem 0;
+                display: none;
+                animation: show-copied-message 2s forwards;
+            }
+            #ip-qrcode {
+                margin: 2rem 0;
+            }
+
+            @keyframes show-copied-message {
+                0% { left: -12rem; }
+                25% { left: 0; }
+                75% { left: 0; }
+                100% { left: -12rem; }
+            }
+        </style>
+    </head>
+    <body>
+        <button id="show-ip" title="Show server addresses">🧭</button>
+        <div id="copied-message">Copied to Clipboard!</div>
+
+        <div id="items"></div>
+        <div id="upload-bar">
+            <input type="file" id="upload-file-raw" hidden multiple/>
+            <button id="upload-file" title="Upload file">
+                📄
+            </button><button id="upload-text" title="Upload text">
+                🔤
+            </button><button id="upload-password" title="Upload password">
+                🔑
+            </button>
+        </div>
+
+        <div class="popup" id="text-popup">
+            <p>Enter text snippet</p>
+            <textarea cols="30" rows="4" id="text-snippet" placeholder="Text snippet"></textarea>
+            <p>
+                <button id="upload-text-cancel" class="cancel">Cancel</button>
+                <button id="upload-text-confirm">Upload</button>
+            </p>
+        </div>
+
+        <div class="popup" id="password-popup">
+            <p>Enter password</p>
+            <p id="password-warning">
+                ⚠ WARNING ⚠<br />
+                The password will be sent and stored as&nbsp;<strong>clear text</strong>.<br />
+                Do not upload password in a public network.<br />
+                Delete the entry as soon as possible.
+            </p>
+            <p><input type="password" id="password-snippet" placeholder="Password"/></p>
+            <p>
+                <button id="upload-password-cancel" class="cancel">Cancel</button>
+                <button id="upload-password-confirm">Upload</button>
+            </p>
+        </div>
+
+        <div class="popup" id="file-popup">
+            <p><span id="file-name"></span> (<span id="file-cur">1</span> / <span id="file-count">1</span>)</p>
+            <p><progress id="file-progress"></progress></p>
+            <p><button id="file-abort" class="cancel">Abort</button></p>
+        </div>
+
+        <div class="popup" id="ip-popup">
+            <p><select id="ip-addrs"></select></p>
+            <p><img id="ip-qrcode" src="" alt="QR code of the selected server address" width="200" height="200"></p>
+            <p><button id="ip-close" class="cancel">Close</button></p>
+        </div>
+
+        <script>
+            /**
+             * @param {string} id
+             * @returns {HTMLElement}
+             */
+            function $(id) {
+                return document.getElementById(id);
+            }
+
+            /**
+             * @param {number} size
+             * @returns {string}
+             */
+            function toHumanSize(size) {
+                if (size <= 1043333) {
+                    return (size / 1024).toFixed(2) + ' KiB';
+                } else if (size < 1068373114) {
+                    return (size / 1048576).toFixed(2) + ' MiB';
+                } else {
+                    return (size / 1073741824).toFixed(2) + ' GiB';
+                }
+            }
+
+            async function deleteSnippet(i) {
+                await fetch(`/snippets/${i}`, {method: 'DELETE'});
+                await reloadSnippets();
+            }
+
+            /**
+             * @param {{type: 'Text'|'Password', content: string}} s
+             */
+            async function postSnippet(s) {
+                await fetch('/snippets', {method: 'POST', body: JSON.stringify(s)});
+                await reloadSnippets();
+            }
+
+            function copyContent(content) {
+                let textArea = document.createElement('textarea');
+                textArea.value = content;
+                textArea.style.position = 'fixed';
+                document.body.appendChild(textArea);
+                try {
+                    textArea.focus();
+                    textArea.select();
+                    document.execCommand('copy');
+                    let copiedMessage = $('copied-message');
+                    copiedMessage.style.display = 'block';
+                    setTimeout(() => copiedMessage.style.display = 'none', 2000);
+                } finally {
+                    document.body.removeChild(textArea);
+                }
+            }
+
+            async function reloadSnippets() {
+                let resp = await fetch('/snippets');
+                /** @type {[{type: 'Text'|'Password', content: string} | {type: 'File', id: number, size: number, name: string, mime: string}]} */
+                let snippets = await resp.json();
+
+                let fragment = document.createDocumentFragment();
+                snippets.forEach((s, i) => {
+                    let child = document.createElement('div');
+                    child.className = s.type.toLowerCase() + ' item';
+                    let content = document.createElement('p');
+                    switch (s.type) {
+                        case 'File':
+                            content.innerText = `${s.name} (${toHumanSize(s.size)})`;
+                            content.onclick = () => downloadFile(i);
+                            break;
+                        case 'Password':
+                            content.innerText = '•'.repeat(Math.min(s.content.length, 512));
+                            content.onclick = () => copyContent(s.content);
+                            break;
+                        case 'Text':
+                            content.innerText = s.content.substr(0, 512);
+                            content.onclick = () => copyContent(s.content);
+                            break;
+                    }
+                    let deleteButton = document.createElement('button');
+                    deleteButton.innerText = '🗑️';
+                    deleteButton.title = 'Delete this item'
+                    deleteButton.onclick = () => deleteSnippet(i);
+
+                    child.append(content, deleteButton);
+                    fragment.prepend(child);
+                });
+
+                let items = $('items');
+                items.innerHTML = '';
+                items.appendChild(fragment);
+            }
+
+            async function reloadIPs() {
+                let resp = await fetch('/ipaddrs');
+                /** @type {[string]} */
+                let ips = await resp.json();
+
+                let fragment = document.createDocumentFragment();
+                ips.forEach(ip => {
+                    let option = document.createElement('option');
+                    option.value = ip;
+                    option.innerText = ip;
+                    fragment.append(option);
+                });
+
+                let ipAddrs = $('ip-addrs');
+                ipAddrs.innerHTML = '';
+                ipAddrs.appendChild(fragment);
+                updateServerQrCode();
+            }
+
+            function updateServerQrCode() {
+                $('ip-qrcode').src = `/qrcode?s=http%3A%2F%2F${encodeURIComponent($('ip-addrs').value)}`;
+            }
+
+            /** @type {XMLHttpRequest} */
+            var CURRENT_FILE_UPLOAD;
+
+            /** @param {FileList} files */
+            async function uploadFiles(files) {
+                let fileCounter = $('file-cur');
+                let fileName = $('file-name');
+                $('file-popup').style.display = 'block';
+                $('file-count').innerText = files.length;
+                try {
+                    for (let i = 0; i < files.length; ++i) {
+                        let file = files[i];
+                        fileCounter.innerText = i + 1;
+                        fileName.innerText = file.name;
+                        await uploadFile(file);
+                    }
+                } finally {
+                    reloadSnippets();
+                    $('file-popup').style.display = 'none';
+                    CURRENT_FILE_UPLOAD = undefined;
+                }
+            }
+
+            /** @param {File} file */
+            function uploadFile(file) {
+                /** @type {HTMLProgressElement} */
+                let progressBar = $('file-progress');
+                progressBar.max = file.size;
+                progressBar.value = 0;
+
+                CURRENT_FILE_UPLOAD = undefined;
+                return new Promise((resolve, reject) => {
+                    // need to use XMLHttpRequest to capture the progress.
+                    let xhr = new XMLHttpRequest();
+                    CURRENT_FILE_UPLOAD = xhr;
+                    xhr.onload = resolve;
+                    xhr.onerror = reject;
+                    xhr.onabort = reject;
+                    xhr.upload.onprogress = (e) => {
+                        progressBar.value = e.loaded;
+                        progressBar.max = e.total;
+                    };
+                    xhr.open('POST', `/upload?f=${encodeURIComponent(file.name)}`);
+                    xhr.overrideMimeType('text/plain');
+                    xhr.setRequestHeader('Content-Type', file.type);
+                    xhr.send(file);
+                });
+            }
+
+            function downloadFile(i) {
+                window.location = `/download/${i}`;
+            }
+
+            $('upload-file').onclick = () => {
+                $('upload-file-raw').click();
+            };
+            $('upload-file-raw').onchange = (e) => {
+                uploadFiles(e.target.files);
+            };
+            $('file-abort').onclick = () => {
+                if (CURRENT_FILE_UPLOAD) {
+                    CURRENT_FILE_UPLOAD.abort();
+                    CURRENT_FILE_UPLOAD = undefined;
+                }
+            };
+
+            $('upload-text').onclick = () => {
+                $('text-snippet').value = '';
+                $('text-popup').style.display = 'block';
+                $('text-snippet').focus();
+            };
+            $('upload-text-cancel').onclick = () => {
+                $('text-popup').style.display = 'none';
+            };
+            $('upload-text-confirm').onclick = async () => {
+                await postSnippet({type: 'Text', content: $('text-snippet').value});
+                $('text-popup').style.display = 'none';
+            };
+            $('upload-password').onclick = () => {
+                $('password-snippet').value = '';
+                $('password-popup').style.display = 'block';
+                $('password-snippet').focus();
+            };
+            $('upload-password-cancel').onclick = () => {
+                $('password-popup').style.display = 'none';
+            };
+            $('upload-password-confirm').onclick = async () => {
+                await postSnippet({type: 'Password', content: $('password-snippet').value});
+                $('password-popup').style.display = 'none';
+            };
+
+            $('show-ip').onclick = async () => {
+                await reloadIPs();
+                $('ip-popup').style.display = 'block';
+            };
+            $('ip-close').onclick = () => {
+                $('ip-popup').style.display = 'none';
+            };
+            $('ip-addrs').onchange = updateServerQrCode;
+
+            reloadSnippets();
+            setInterval(reloadSnippets, 5000);
+        </script>
+    </body>
+</html>
