@@ -1,0 +1,21 @@
+[licenses]
+allow = ["MIT", "BSL-1.0"]
+exceptions = [
+    { name = "cloudabi", allow = ["BSD-2-Clause"] },
+    { name = "fuchsia-zircon", allow = ["BSD-3-Clause"] },
+    { name = "fuchsia-zircon-sys", allow = ["BSD-3-Clause"] },
+]
+
+
+[bans]
+multiple-versions = "warn"
+skip-tree = [
+    # waiting for `crossbeam-epoch 0.8.1` and `crossbeam-utils 0.7.1` releases
+    # to include https://github.com/crossbeam-rs/crossbeam/pull/460
+    # for `autocfg` conflict v0.1.7 vs v1.0.0.
+    { name = "crossbeam-epoch", version = "=0.8.0" },
+    { name = "crossbeam-utils", version = "=0.7.0" },
+    # waiting for http-service-hyper to update its `hyper` depenency to 0.13.
+    # it's going to be lots of work though.
+    { name = "http-service-hyper", version = "=0.4.1" },
+]
