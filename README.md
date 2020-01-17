@@ -10,8 +10,8 @@ Visit the web page via any device on the LAN.
 
 ![Screenshot of Shary](doc/screen.png)
 
-* Click on "📄" at the bottom to share a file
-* Click on "🔤" at the bottom to share some text.
+* Click on "📤" at the bottom to share a file
+* Click on "📝" at the bottom to share some text.
 * Click on "🔑" at the bottom to share a password.
 
 The shared entries are shown in the middle of the page.
