@@ -72,9 +72,14 @@
             .item > button {
                 position: absolute;
                 top: 0;
-                right: 0;
-                width: 2.5rem;
+                width: 2rem;
                 height: 2.5rem;
+            }
+            .show-qr {
+                right: 2rem;
+            }
+            .delete-item {
+                right: 0;
             }
             #upload-bar {
                 position: absolute;
@@ -209,6 +214,12 @@
             <p><button id="ip-close" class="cancel">Close</button></p>
         </div>
 
+        <div class="popup" id="text-qr-popup">
+            <p id="text-qr-prompt"></p>
+            <p><img id="text-qrcode" src="" alt="QR code of the text item" width="200" height="200"></p>
+            <p><button id="text-qr-close" class="cancel">Close</button></p>
+        </div>
+
         <script>
             /**
              * @param {string} id
@@ -272,26 +283,37 @@
                     let child = document.createElement('div');
                     child.className = s.type.toLowerCase() + ' item';
                     let content = document.createElement('p');
-                    switch (s.type) {
-                        case 'File':
-                            content.innerText = `${s.name} (${toHumanSize(s.size)})`;
-                            content.onclick = () => downloadFile(i);
-                            break;
-                        case 'Password':
-                            content.innerText = '•'.repeat(Math.min(s.content.length, 512));
-                            content.onclick = () => copyContent(s.content);
-                            break;
-                        case 'Text':
-                            content.innerText = s.content.substr(0, 512);
-                            content.onclick = () => copyContent(s.content);
-                            break;
+                    /** @type {HTMLButtonElement | undefined} */
+                    let qrButton = undefined;
+
+                    if (s.type === 'File') {
+                        content.innerText = `${s.name} (${toHumanSize(s.size)})`;
+                        content.onclick = () => downloadFile(i);
+                    } else {
+                        let prompt = s.type === 'Password' ? '•'.repeat(Math.min(s.content.length, 512)) : s.content.substr(0, 512);
+                        content.innerText = prompt;
+                        content.onclick = () => copyContent(s.content);
+                        if (s.content.length < 512) {
+                            qrButton = document.createElement('button');
+                            qrButton.innerText = '🔳';
+                            qrButton.title = 'Display QR code';
+                            qrButton.className = 'show-qr';
+                            qrButton.onclick = () => showQrCode(s.content, prompt);
+                        }
                     }
+
+                    child.appendChild(content);
+                    if (qrButton) {
+                        child.appendChild(qrButton);
+                    }
+
                     let deleteButton = document.createElement('button');
                     deleteButton.innerText = '🗑️';
-                    deleteButton.title = 'Delete this item'
+                    deleteButton.title = 'Delete this item';
                     deleteButton.onclick = () => deleteSnippet(i);
+                    deleteButton.className = 'delete-item';
+                    child.appendChild(deleteButton);
 
-                    child.append(content, deleteButton);
                     fragment.prepend(child);
                 });
 
@@ -321,6 +343,16 @@
 
             function updateServerQrCode() {
                 $('ip-qrcode').src = `/qrcode?s=http%3A%2F%2F${encodeURIComponent($('ip-addrs').value)}`;
+            }
+
+            /**
+             * @param {string} content
+             * @param {string} prompt
+             */
+            function showQrCode(content, prompt) {
+                $('text-qr-prompt').innerText = prompt;
+                $('text-qr-popup').style.display = 'block';
+                $('text-qrcode').src = `/qrcode?s=${encodeURIComponent(content)}`;
             }
 
             /** @type {XMLHttpRequest} */
@@ -422,6 +454,10 @@
                 $('ip-popup').style.display = 'none';
             };
             $('ip-addrs').onchange = updateServerQrCode;
+
+            $('text-qr-close').onclick = () => {
+                $('text-qr-popup').style.display = 'none';
+            };
 
             reloadSnippets();
             setInterval(reloadSnippets, 5000);
