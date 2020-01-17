@@ -8,7 +8,7 @@ Run the `shary` executable. It will start an HTTP server, listening on `0.0.0.0:
 
 Visit the web page via any device on the LAN.
 
-![Screenshot of Shary](doc/screen.png)
+<img src="doc/screen.png" width="320" height="480" alt="Screenshot of Shary" />
 
 * Click on "📤" at the bottom to share a file
 * Click on "📝" at the bottom to share some text.
@@ -18,6 +18,7 @@ The shared entries are shown in the middle of the page.
 
 * Click on any item to copy or download it.
 * Click on "🗑️" to delete the entry.
+* Click on "🔳" to display QR code of short text or password content (not encrypted).
 
 The server address can be found by clicking "🧭" on the top-right.
 
