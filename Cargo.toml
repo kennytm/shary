@@ -1,6 +1,6 @@
 [package]
 name = "shary"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["kennytm <kennytm@gmail.com>"]
 edition = "2018"
 description = "HTTP server for sharing files and text snippets in LAN"
@@ -21,7 +21,7 @@ mime = "0.3.16"
 serde = { version = "1.0.104", features = ["derive"] }
 structopt = "0.3.5"
 tempfile = "3.1.0"
-tide = "0.5.1"
+tide = "0.6.0"
 qrcode = { version = "0.11.0", default-features = false, features = ["svg"] }
 
 [features]
