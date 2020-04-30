@@ -6,12 +6,12 @@ use async_std::{
     sync::RwLock,
     task::block_on,
 };
-use futures_util::future::FutureExt;
 use get_if_addrs::get_if_addrs;
 use mime::{APPLICATION_OCTET_STREAM, IMAGE_SVG, TEXT_HTML_UTF_8};
 use qrcode::{render::svg::Color, EcLevel, QrCode};
 use serde::{Deserialize, Serialize};
 use std::{
+    error::Error,
     io::{self, ErrorKind},
     mem::swap,
     net::SocketAddr,
@@ -20,7 +20,11 @@ use std::{
 };
 use structopt::StructOpt;
 use tempfile::tempdir;
-use tide::{self, IntoResponse, Request, Response, ResultExt};
+use tide::{
+    self,
+    http::{headers::CONTENT_TYPE, StatusCode},
+    Request, Response,
+};
 
 #[derive(StructOpt)]
 struct Opt {
@@ -110,25 +114,19 @@ fn main() {
         upload_dir: upload_dir.path().to_owned(),
         upload_counter: AtomicUsize::new(0),
     });
-    server.at("/").get(|_| respond_index().map(handle_error));
+    server.at("/").get(|_| respond_index());
     server
         .at("/snippets")
-        .get(|req| respond_get_snippets(req).map(handle_error))
-        .post(|req| respond_post_snippets(req).map(handle_error))
+        .get(respond_get_snippets)
+        .post(respond_post_snippets)
         .at(":i")
-        .delete(|req| respond_delete_snippet(req).map(handle_error));
-    server
-        .at("/upload")
-        .post(|req| respond_upload(req).map(handle_error));
-    server
-        .at("/download/:i")
-        .get(|req| respond_download(req).map(handle_error));
+        .delete(respond_delete_snippet);
+    server.at("/upload").post(respond_upload);
+    server.at("/download/:i").get(respond_download);
     server
         .at("/ipaddrs")
-        .get(|req| async { handle_error(respond_ipaddrs(req)) });
-    server
-        .at("/qrcode")
-        .get(|req| respond_qrcode(req).map(handle_error));
+        .get(|req| async { respond_ipaddrs(req) });
+    server.at("/qrcode").get(respond_qrcode);
 
     block_on(server.listen(listen_address).race(async move {
         listen_ctrlc.await;
@@ -137,60 +135,58 @@ fn main() {
     .unwrap();
 }
 
+fn client_err<E: Error + Send + Sync + 'static>(e: E) -> tide::Error {
+    tide::Error::new(StatusCode::BadRequest, e)
+}
+
 #[cfg(feature = "read_index_html_from_file_system")]
 async fn respond_index() -> tide::Result<Response> {
     let mut path = PathBuf::from(file!());
     path.set_file_name("web");
     path.push("index.html");
-    let content = BufReader::new(File::open(path).await.server_err()?);
-    Ok(Response::with_reader(200, content).set_mime(TEXT_HTML_UTF_8))
+    let content = BufReader::new(File::open(path).await?);
+    Ok(Response::new(StatusCode::Ok)
+        .body(content)
+        .set_mime(TEXT_HTML_UTF_8))
 }
 
 #[cfg(not(feature = "read_index_html_from_file_system"))]
 async fn respond_index() -> tide::Result<Response> {
     let content = &include_bytes!("web/index.min.html.gz")[..];
-    Ok(Response::with_reader(200, content)
+    Ok(Response::new(StatusCode::Ok)
+        .body(content)
         .set_mime(TEXT_HTML_UTF_8)
-        .set_header("Content-Encoding", "gzip"))
-}
-
-fn handle_error(res: tide::Result<Response>) -> Response {
-    match res {
-        Ok(r) => r,
-        Err(e) => e.into_response().body(&b"Error"[..]),
-    }
+        .set_header("Content-Encoding".parse().unwrap(), "gzip"))
 }
 
 async fn respond_get_snippets(req: Request<State>) -> tide::Result<Response> {
     let state = req.state();
     let snippets = state.snippets.read().await;
-    Ok(Response::new(200).body_json(&*snippets).server_err()?)
+    Ok(Response::new(StatusCode::Ok).body_json(&*snippets)?)
 }
 
 async fn respond_post_snippets(mut req: Request<State>) -> tide::Result<Response> {
-    let snippet = req.body_json::<Snippet>().await.client_err()?;
+    let snippet = req.body_json::<Snippet>().await.map_err(client_err)?;
     if let Snippet::File { .. } = snippet {
-        return Ok(Response::with_reader(
-            400,
-            &b"cannot upload a file using POST /snippets"[..],
-        ));
+        return Ok(Response::new(StatusCode::BadRequest)
+            .body_string("cannot upload a file using POST /snippets".to_owned()));
     }
 
     let state = req.state();
     state.push_snippet(snippet).await;
-    Ok(Response::new(200))
+    Ok(Response::new(StatusCode::Ok))
 }
 
 async fn respond_delete_snippet(req: Request<State>) -> tide::Result<Response> {
-    let i = req.param::<usize>("i").client_err()?;
+    let i = req.param::<usize>("i").map_err(client_err)?;
     let state = req.state();
     let mut snippets = state.snippets.write().await;
     if i < snippets.len() {
         let snippet = snippets.remove(i);
         state.delete_snippet(snippet).await;
-        Ok(Response::new(200))
+        Ok(Response::new(StatusCode::Ok))
     } else {
-        Ok(Response::new(404))
+        Ok(Response::new(StatusCode::NotFound))
     }
 }
 
@@ -210,14 +206,14 @@ async fn respond_upload(mut req: Request<State>) -> tide::Result<Response> {
         path = state.upload_path(id);
     }
 
-    let mut f = File::create(&path).await.server_err()?;
-    let size_result = copy(&mut req, &mut f).await.server_err();
+    let mut f = File::create(&path).await?;
+    let size_result = copy(&mut req, &mut f).await;
     drop(f);
     let size = match size_result {
         Ok(size) => size,
         Err(e) => {
             let _ = remove_file(path).await;
-            return Err(e);
+            return Err(e.into());
         }
     };
 
@@ -227,28 +223,30 @@ async fn respond_upload(mut req: Request<State>) -> tide::Result<Response> {
         size,
         name,
         mime: req
-            .header("Content-Type")
-            .map_or_else(|| APPLICATION_OCTET_STREAM.to_string(), ToOwned::to_owned),
+            .header(&CONTENT_TYPE)
+            .and_then(|values| values.last())
+            .map_or_else(|| APPLICATION_OCTET_STREAM.to_string(), ToString::to_string),
     };
     state.push_snippet(snippet).await;
-    Ok(Response::new(200))
+    Ok(Response::new(StatusCode::Ok))
 }
 
 async fn respond_download(req: Request<State>) -> tide::Result<Response> {
-    let i = req.param::<usize>("i").client_err()?;
+    let i = req.param::<usize>("i").map_err(client_err)?;
     let state = req.state();
     let snippets = state.snippets.read().await;
     let (id, name, mime) = match snippets.get(i) {
         Some(Snippet::File { id, name, mime, .. }) => (*id, name, mime),
-        _ => return Ok(Response::new(404)),
+        _ => return Ok(Response::new(StatusCode::NotFound)),
     };
     let path = state.upload_path(id);
-    let reader = BufReader::new(File::open(path).await.server_err()?);
+    let reader = BufReader::new(File::open(path).await?);
 
-    Ok(Response::with_reader(200, reader)
-        .set_header("Content-Type", mime)
+    Ok(Response::new(StatusCode::Ok)
+        .body(reader)
+        .set_header(CONTENT_TYPE, mime)
         .set_header(
-            "Content-Disposition",
+            "Content-Disposition".parse().unwrap(),
             format!("attachment; filename=\"{}\"", name.replace('"', "\\\"")),
         ))
 }
@@ -270,8 +268,8 @@ fn get_server_addresses(address: SocketAddr) -> io::Result<Vec<String>> {
 }
 
 fn respond_ipaddrs(req: Request<State>) -> tide::Result<Response> {
-    let addresses = get_server_addresses(req.state().opt.address).server_err()?;
-    Response::new(200).body_json(&addresses).server_err()
+    let addresses = get_server_addresses(req.state().opt.address)?;
+    Ok(Response::new(StatusCode::Ok).body_json(&addresses)?)
 }
 
 async fn respond_qrcode(req: Request<State>) -> tide::Result<Response> {
@@ -281,13 +279,14 @@ async fn respond_qrcode(req: Request<State>) -> tide::Result<Response> {
     }
 
     let input = req.query::<Query>()?.s;
-    let image = QrCode::with_error_correction_level(input, EcLevel::L)
-        .server_err()?
+    let image = QrCode::with_error_correction_level(input, EcLevel::L)?
         .render()
         .dark_color(Color("#eee"))
         .light_color(Color("transparent"))
         .quiet_zone(false)
         .build();
 
-    Ok(Response::with_reader(200, Cursor::new(image)).set_mime(IMAGE_SVG))
+    Ok(Response::new(StatusCode::Ok)
+        .body(Cursor::new(image))
+        .set_mime(IMAGE_SVG))
 }
