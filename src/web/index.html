@@ -245,7 +245,6 @@
 
             async function deleteSnippet(i) {
                 await fetch(`/snippets/${i}`, {method: 'DELETE'});
-                await reloadSnippets();
             }
 
             /**
@@ -253,7 +252,6 @@
              */
             async function postSnippet(s) {
                 await fetch('/snippets', {method: 'POST', body: JSON.stringify(s)});
-                await reloadSnippets();
             }
 
             function copyContent(content) {
@@ -372,7 +370,6 @@
                         await uploadFile(file);
                     }
                 } finally {
-                    reloadSnippets();
                     $('file-popup').style.display = 'none';
                     CURRENT_FILE_UPLOAD = undefined;
                 }
@@ -460,7 +457,8 @@
             };
 
             reloadSnippets();
-            setInterval(reloadSnippets, 5000);
+            let sse = new EventSource('/updated');
+            sse.addEventListener('updated', reloadSnippets);
         </script>
     </body>
 </html>

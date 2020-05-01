@@ -13,8 +13,7 @@ keywords = ["file-sharing"]
 
 [dependencies]
 async-ctrlc = "1.0.0"
-async-std = { version = "1.5.0", default-features = false, features = ["unstable"] }
-futures-util = "0.3.4"
+async-std = { version = "1.5.0", features = ["unstable"], git = "https://github.com/async-rs/async-std.git", branch = "master" }
 get_if_addrs = "0.5.3"
 hostname = "0.3.1"
 mime = "0.3.16"

@@ -3,7 +3,7 @@ use async_std::{
     fs::{remove_file, File},
     io::{copy, BufReader, Cursor},
     prelude::FutureExt as _,
-    sync::RwLock,
+    sync::{RwLock, Mutex, Condvar},
     task::block_on,
 };
 use get_if_addrs::get_if_addrs;
@@ -23,7 +23,7 @@ use tempfile::tempdir;
 use tide::{
     self,
     http::{headers::CONTENT_TYPE, StatusCode},
-    Request, Response,
+    sse, Request, Response,
 };
 
 #[derive(StructOpt)]
@@ -61,6 +61,7 @@ struct State {
     snippets: SharedSnippets,
     upload_dir: PathBuf,
     upload_counter: AtomicUsize,
+    snippets_updated: Condvar,
 }
 
 impl State {
@@ -69,17 +70,18 @@ impl State {
     }
 
     async fn push_snippet(&self, mut snippet: Snippet) {
-        {
-            let mut snippets = self.snippets.write().await;
+        let mut snippets = self.snippets.write().await;
 
-            if snippets.len() < self.opt.max_snippets {
-                snippets.push(snippet);
-                return;
-            }
+        if snippets.len() < self.opt.max_snippets {
+            snippets.push(snippet);
+            drop(snippets);
+            self.snippets_updated.notify_all();
+        } else {
             swap(&mut snippets[0], &mut snippet);
             snippets.rotate_left(1);
+            drop(snippets);
+            self.delete_snippet(snippet).await;
         }
-        self.delete_snippet(snippet).await;
     }
 
     async fn delete_snippet(&self, snippet: Snippet) {
@@ -87,6 +89,7 @@ impl State {
             let path = self.upload_path(id);
             let _ = remove_file(path).await;
         }
+        self.snippets_updated.notify_all();
     }
 }
 
@@ -113,6 +116,7 @@ fn main() {
         snippets: SharedSnippets::default(),
         upload_dir: upload_dir.path().to_owned(),
         upload_counter: AtomicUsize::new(0),
+        snippets_updated: Condvar::new(),
     });
     server.at("/").get(|_| respond_index());
     server
@@ -127,6 +131,9 @@ fn main() {
         .at("/ipaddrs")
         .get(|req| async { respond_ipaddrs(req) });
     server.at("/qrcode").get(respond_qrcode);
+    server
+        .at("/updated")
+        .get(sse::endpoint(snippet_update_monitor));
 
     block_on(server.listen(listen_address).race(async move {
         listen_ctrlc.await;
@@ -289,4 +296,13 @@ async fn respond_qrcode(req: Request<State>) -> tide::Result<Response> {
     Ok(Response::new(StatusCode::Ok)
         .body(Cursor::new(image))
         .set_mime(IMAGE_SVG))
+}
+
+async fn snippet_update_monitor(req: Request<State>, sse_sender: sse::Sender) -> tide::Result<()> {
+    let dummy_mutex = Mutex::new(());
+    let mut dummy_guard = dummy_mutex.lock().await;
+    loop {
+        dummy_guard = req.state().snippets_updated.wait(dummy_guard).await;
+        sse_sender.send("updated", "1", None).await;
+    }
 }
