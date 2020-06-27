@@ -12,15 +12,14 @@ readme = "README.md"
 keywords = ["file-sharing"]
 
 [dependencies]
-async-ctrlc = "1.0.0"
-async-std = { version = "1.5.0", features = ["unstable"], git = "https://github.com/async-rs/async-std.git", branch = "master" }
+async-ctrlc = "1.2.0"
+async-std = { version = "1.6.2", features = ["unstable"] }
 get_if_addrs = "0.5.3"
 hostname = "0.3.1"
-mime = "0.3.16"
-serde = { version = "1.0.106", features = ["derive"] }
-structopt = "0.3.14"
+serde = { version = "1.0.114", features = ["derive"] }
+structopt = "0.3.15"
 tempfile = "3.1.0"
-tide = "0.8.0"
+tide = "0.11.0"
 qrcode = { version = "0.12.0", default-features = false, features = ["svg"] }
 
 [features]

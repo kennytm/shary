@@ -1,16 +1,16 @@
 use async_ctrlc::CtrlC;
 use async_std::{
     fs::{remove_file, File},
-    io::{copy, BufReader, Cursor},
+    io::{copy, BufReader},
     prelude::FutureExt as _,
-    sync::{RwLock, Mutex, Condvar},
+    sync::{Condvar, Mutex, RwLock},
     task::block_on,
 };
 use get_if_addrs::get_if_addrs;
-use mime::{APPLICATION_OCTET_STREAM, IMAGE_SVG, TEXT_HTML_UTF_8};
 use qrcode::{render::svg::Color, EcLevel, QrCode};
 use serde::{Deserialize, Serialize};
 use std::{
+    convert::TryInto,
     error::Error,
     io::{self, ErrorKind},
     mem::swap,
@@ -22,8 +22,12 @@ use structopt::StructOpt;
 use tempfile::tempdir;
 use tide::{
     self,
-    http::{headers::CONTENT_TYPE, StatusCode},
-    sse, Request, Response,
+    http::{
+        headers::{CONTENT_ENCODING, CONTENT_TYPE},
+        mime::{BYTE_STREAM, HTML, SVG},
+        StatusCode,
+    },
+    sse, Body, Request, Response,
 };
 
 #[derive(StructOpt)]
@@ -152,31 +156,36 @@ async fn respond_index() -> tide::Result<Response> {
     path.set_file_name("web");
     path.push("index.html");
     let content = BufReader::new(File::open(path).await?);
-    Ok(Response::new(StatusCode::Ok)
-        .body(content)
-        .set_mime(TEXT_HTML_UTF_8))
+    let mut resp = Response::new(StatusCode::Ok);
+    resp.set_body(content);
+    resp.set_mime(HTML);
+    Ok(resp)
 }
 
 #[cfg(not(feature = "read_index_html_from_file_system"))]
 async fn respond_index() -> tide::Result<Response> {
     let content = &include_bytes!("web/index.min.html.gz")[..];
-    Ok(Response::new(StatusCode::Ok)
-        .body(content)
-        .set_mime(TEXT_HTML_UTF_8)
-        .set_header("Content-Encoding".parse().unwrap(), "gzip"))
+    let mut resp = Response::new(StatusCode::Ok);
+    resp.set_body(content);
+    resp.set_content_type(HTML);
+    resp.insert_header(CONTENT_ENCODING, "gzip");
+    Ok(resp)
 }
 
 async fn respond_get_snippets(req: Request<State>) -> tide::Result<Response> {
     let state = req.state();
     let snippets = state.snippets.read().await;
-    Ok(Response::new(StatusCode::Ok).body_json(&*snippets)?)
+    let mut resp = Response::new(StatusCode::Ok);
+    resp.set_body(Body::from_json(&*snippets)?);
+    Ok(resp)
 }
 
 async fn respond_post_snippets(mut req: Request<State>) -> tide::Result<Response> {
-    let snippet = req.body_json::<Snippet>().await.map_err(client_err)?;
+    let snippet = req.body_json::<Snippet>().await?;
     if let Snippet::File { .. } = snippet {
-        return Ok(Response::new(StatusCode::BadRequest)
-            .body_string("cannot upload a file using POST /snippets".to_owned()));
+        let mut resp = Response::new(StatusCode::BadRequest);
+        resp.set_body("cannot upload a file using POST /snippets");
+        return Ok(resp);
     }
 
     let state = req.state();
@@ -229,10 +238,7 @@ async fn respond_upload(mut req: Request<State>) -> tide::Result<Response> {
         id,
         size,
         name,
-        mime: req
-            .header(&CONTENT_TYPE)
-            .and_then(|values| values.last())
-            .map_or_else(|| APPLICATION_OCTET_STREAM.to_string(), ToString::to_string),
+        mime: req.content_type().unwrap_or(BYTE_STREAM).to_string(),
     };
     state.push_snippet(snippet).await;
     Ok(Response::new(StatusCode::Ok))
@@ -242,20 +248,25 @@ async fn respond_download(req: Request<State>) -> tide::Result<Response> {
     let i = req.param::<usize>("i").map_err(client_err)?;
     let state = req.state();
     let snippets = state.snippets.read().await;
-    let (id, name, mime) = match snippets.get(i) {
-        Some(Snippet::File { id, name, mime, .. }) => (*id, name, mime),
+    let (id, size, name, mime) = match snippets.get(i) {
+        Some(Snippet::File {
+            id,
+            size,
+            name,
+            mime,
+        }) => (*id, *size, name, mime),
         _ => return Ok(Response::new(StatusCode::NotFound)),
     };
     let path = state.upload_path(id);
     let reader = BufReader::new(File::open(path).await?);
-
-    Ok(Response::new(StatusCode::Ok)
-        .body(reader)
-        .set_header(CONTENT_TYPE, mime)
-        .set_header(
-            "Content-Disposition".parse().unwrap(),
-            format!("attachment; filename=\"{}\"", name.replace('"', "\\\"")),
-        ))
+    let mut resp = Response::new(StatusCode::Ok);
+    resp.set_body(Body::from_reader(reader, size.try_into().ok()));
+    resp.insert_header(CONTENT_TYPE, &**mime);
+    resp.insert_header(
+        "Content-Disposition",
+        format!("attachment; filename=\"{}\"", name.replace('"', "\\\"")),
+    );
+    Ok(resp)
 }
 
 fn get_server_addresses(address: SocketAddr) -> io::Result<Vec<String>> {
@@ -276,7 +287,9 @@ fn get_server_addresses(address: SocketAddr) -> io::Result<Vec<String>> {
 
 fn respond_ipaddrs(req: Request<State>) -> tide::Result<Response> {
     let addresses = get_server_addresses(req.state().opt.address)?;
-    Ok(Response::new(StatusCode::Ok).body_json(&addresses)?)
+    let mut resp = Response::new(StatusCode::Ok);
+    resp.set_body(Body::from_json(&addresses)?);
+    Ok(resp)
 }
 
 async fn respond_qrcode(req: Request<State>) -> tide::Result<Response> {
@@ -292,10 +305,10 @@ async fn respond_qrcode(req: Request<State>) -> tide::Result<Response> {
         .light_color(Color("transparent"))
         .quiet_zone(false)
         .build();
-
-    Ok(Response::new(StatusCode::Ok)
-        .body(Cursor::new(image))
-        .set_mime(IMAGE_SVG))
+    let mut resp = Response::new(StatusCode::Ok);
+    resp.set_body(image);
+    resp.set_content_type(SVG);
+    Ok(resp)
 }
 
 async fn snippet_update_monitor(req: Request<State>, sse_sender: sse::Sender) -> tide::Result<()> {
