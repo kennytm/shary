@@ -1,44 +1,49 @@
-use async_ctrlc::CtrlC;
-use async_std::{
-    fs::{remove_file, File},
-    io::{copy, BufReader},
-    prelude::FutureExt as _,
-    sync::{Condvar, Mutex, RwLock},
-    task::block_on,
+use axum::{
+    Json, Router,
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, Path, Query, State as AppState},
+    http::{
+        HeaderMap, StatusCode,
+        header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE},
+    },
+    response::{IntoResponse, Sse, sse::Event},
+    routing::{delete, get, post},
 };
-use get_if_addrs::get_if_addrs;
-use qrcode::{render::svg::Color, EcLevel, QrCode};
+use futures_util::{Stream, TryStreamExt, stream};
+use if_addrs::get_if_addrs;
+use mime::{APPLICATION_OCTET_STREAM, Mime};
+use qrcode::{EcLevel, QrCode, render::svg::Color};
 use serde::{Deserialize, Serialize};
 use std::{
-    convert::TryInto,
-    error::Error,
-    io::{self, ErrorKind},
-    mem::swap,
+    convert::Infallible,
+    io,
     net::SocketAddr,
     path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
-};
-use structopt::StructOpt;
-use tempfile::tempdir;
-use tide::{
-    self,
-    http::{
-        headers::{CONTENT_ENCODING, CONTENT_TYPE},
-        mime::{BYTE_STREAM, HTML, SVG},
-        StatusCode,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     },
-    sse, Body, Request, Response,
 };
+use tempfile::tempdir;
+use tokio::{
+    fs::{File, remove_file},
+    io::{AsyncWriteExt, copy},
+    net::TcpListener,
+    sync::{RwLock, watch},
+};
+use tokio_util::io::{ReaderStream, StreamReader};
 
-#[derive(StructOpt)]
-struct Opt {
-    /// Listening address
-    #[structopt(short, long, default_value = "0.0.0.0:22888")]
-    address: SocketAddr,
+xflags::xflags! {
+    cmd shary {
+        /// Listening address (default: 0.0.0.0:22888)
+        optional -a, --address address: SocketAddr
 
-    /// Maximum number of snippets to store
-    #[structopt(short, long, default_value = "8")]
-    max_snippets: usize,
+        /// Maximum number of snippets to store (default: 8)
+        optional -m, --max-snippets count: usize
+
+        /// Print version information
+        optional -V, --version
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -61,11 +66,12 @@ enum Snippet {
 type SharedSnippets = RwLock<Vec<Snippet>>;
 
 struct State {
-    opt: Opt,
+    address: SocketAddr,
+    max_snippets: usize,
     snippets: SharedSnippets,
     upload_dir: PathBuf,
     upload_counter: AtomicUsize,
-    snippets_updated: Condvar,
+    snippets_updated: watch::Sender<()>,
 }
 
 impl State {
@@ -73,18 +79,16 @@ impl State {
         self.upload_dir.join(format!("{}", id))
     }
 
-    async fn push_snippet(&self, mut snippet: Snippet) {
+    async fn push_snippet(&self, snippet: Snippet) {
         let mut snippets = self.snippets.write().await;
+        snippets.push(snippet);
+        let evicted = (snippets.len() > self.max_snippets).then(|| snippets.remove(0));
+        drop(snippets);
 
-        if snippets.len() < self.opt.max_snippets {
-            snippets.push(snippet);
-            drop(snippets);
-            self.snippets_updated.notify_all();
-        } else {
-            swap(&mut snippets[0], &mut snippet);
-            snippets.rotate_left(1);
-            drop(snippets);
+        if let Some(snippet) = evicted {
             self.delete_snippet(snippet).await;
+        } else {
+            self.snippets_updated.send_replace(());
         }
     }
 
@@ -93,15 +97,26 @@ impl State {
             let path = self.upload_path(id);
             let _ = remove_file(path).await;
         }
-        self.snippets_updated.notify_all();
+        self.snippets_updated.send_replace(());
     }
 }
 
-fn main() {
-    let opt = Opt::from_args();
+#[tokio::main]
+async fn main() -> io::Result<()> {
+    let flags = Shary::from_env_or_exit();
+    if flags.version {
+        println!("shary {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let upload_dir = tempdir().expect("cannot prepare upload directory");
-    let listen_ctrlc = CtrlC::new().expect("cannot capture Ctrl+C");
-    let listen_address = opt.address;
+    let listener = TcpListener::bind(
+        flags
+            .address
+            .unwrap_or_else(|| ([0, 0, 0, 0], 22888).into()),
+    )
+    .await?;
+    let listen_address = listener.local_addr()?;
 
     println!("Files will be uploaded to {}", upload_dir.path().display());
     if let Ok(Some(real_address)) =
@@ -115,158 +130,171 @@ fn main() {
         println!("Visit <{}>\n{}", url, qrcode);
     }
 
-    let mut server = tide::with_state(State {
-        opt,
+    let state = Arc::new(State {
+        address: listen_address,
+        max_snippets: flags.max_snippets.unwrap_or(8),
         snippets: SharedSnippets::default(),
         upload_dir: upload_dir.path().to_owned(),
         upload_counter: AtomicUsize::new(0),
-        snippets_updated: Condvar::new(),
+        snippets_updated: watch::channel(()).0,
     });
-    server.at("/").get(|_| respond_index());
-    server
-        .at("/snippets")
-        .get(respond_get_snippets)
-        .post(respond_post_snippets)
-        .at(":i")
-        .delete(respond_delete_snippet);
-    server.at("/upload").post(respond_upload);
-    server.at("/download/:i").get(respond_download);
-    server
-        .at("/ipaddrs")
-        .get(|req| async { respond_ipaddrs(req) });
-    server.at("/qrcode").get(respond_qrcode);
-    server
-        .at("/updated")
-        .get(sse::endpoint(snippet_update_monitor));
+    let app = Router::new()
+        .route("/", get(respond_index))
+        .route(
+            "/snippets",
+            get(respond_get_snippets)
+                .post(respond_post_snippets)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route("/snippets/{i}", delete(respond_delete_snippet))
+        .route("/upload", post(respond_upload))
+        .route("/download/{i}", get(respond_download))
+        .route("/ipaddrs", get(respond_ipaddrs))
+        .route("/qrcode", get(respond_qrcode))
+        .route("/updated", get(snippet_update_monitor))
+        .with_state(state);
 
-    block_on(server.listen(listen_address).race(async move {
-        listen_ctrlc.await;
-        Err(ErrorKind::Interrupted.into())
-    }))
-    .unwrap();
+    tokio::select! {
+        result = axum::serve(listener, app) => result,
+        result = tokio::signal::ctrl_c() => result,
+    }
 }
 
-fn client_err<E: Error + Send + Sync + 'static>(e: E) -> tide::Error {
-    tide::Error::new(StatusCode::BadRequest, e)
+fn internal_error(error: impl std::fmt::Display) -> StatusCode {
+    eprintln!("{error}");
+    StatusCode::INTERNAL_SERVER_ERROR
 }
 
 #[cfg(feature = "read_index_html_from_file_system")]
-async fn respond_index() -> tide::Result<Response> {
+async fn respond_index() -> Result<impl IntoResponse, StatusCode> {
     let mut path = PathBuf::from(file!());
     path.set_file_name("web");
     path.push("index.html");
-    let content = BufReader::new(File::open(path).await?);
-    let mut resp = Response::new(StatusCode::Ok);
-    resp.set_body(content);
-    resp.set_mime(HTML);
-    Ok(resp)
+    let content = tokio::fs::read(path).await.map_err(internal_error)?;
+    Ok(([(CONTENT_TYPE, "text/html; charset=utf-8")], content))
 }
 
 #[cfg(not(feature = "read_index_html_from_file_system"))]
-async fn respond_index() -> tide::Result<Response> {
+async fn respond_index() -> impl IntoResponse {
     let content = &include_bytes!("web/index.min.html.gz")[..];
-    let mut resp = Response::new(StatusCode::Ok);
-    resp.set_body(content);
-    resp.set_content_type(HTML);
-    resp.insert_header(CONTENT_ENCODING, "gzip");
-    Ok(resp)
+    (
+        [
+            (CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CONTENT_ENCODING, "gzip"),
+        ],
+        content,
+    )
 }
 
-async fn respond_get_snippets(req: Request<State>) -> tide::Result<Response> {
-    let state = req.state();
+async fn respond_get_snippets(AppState(state): AppState<Arc<State>>) -> impl IntoResponse {
     let snippets = state.snippets.read().await;
-    let mut resp = Response::new(StatusCode::Ok);
-    resp.set_body(Body::from_json(&*snippets)?);
-    Ok(resp)
+    Json(&*snippets).into_response()
 }
 
-async fn respond_post_snippets(mut req: Request<State>) -> tide::Result<Response> {
-    let snippet = req.body_json::<Snippet>().await?;
+async fn respond_post_snippets(
+    AppState(state): AppState<Arc<State>>,
+    body: Bytes,
+) -> Result<StatusCode, (StatusCode, &'static str)> {
+    // The browser sends JSON with a text/plain content type.
+    let snippet =
+        serde_json::from_slice(&body).map_err(|_| (StatusCode::UNPROCESSABLE_ENTITY, ""))?;
     if let Snippet::File { .. } = snippet {
-        let mut resp = Response::new(StatusCode::BadRequest);
-        resp.set_body("cannot upload a file using POST /snippets");
-        return Ok(resp);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "cannot upload a file using POST /snippets",
+        ));
     }
 
-    let state = req.state();
     state.push_snippet(snippet).await;
-    Ok(Response::new(StatusCode::Ok))
+    Ok(StatusCode::OK)
 }
 
-async fn respond_delete_snippet(req: Request<State>) -> tide::Result<Response> {
-    let i = req.param::<usize>("i").map_err(client_err)?;
-    let state = req.state();
+async fn respond_delete_snippet(
+    AppState(state): AppState<Arc<State>>,
+    Path(i): Path<usize>,
+) -> StatusCode {
     let mut snippets = state.snippets.write().await;
     if i < snippets.len() {
         let snippet = snippets.remove(i);
         state.delete_snippet(snippet).await;
-        Ok(Response::new(StatusCode::Ok))
+        StatusCode::OK
     } else {
-        Ok(Response::new(StatusCode::NotFound))
+        StatusCode::NOT_FOUND
     }
 }
 
-async fn respond_upload(mut req: Request<State>) -> tide::Result<Response> {
-    #[derive(Deserialize)]
-    struct Query {
-        f: String,
+#[derive(Deserialize)]
+struct UploadQuery {
+    f: String,
+}
+
+async fn respond_upload(
+    AppState(state): AppState<Arc<State>>,
+    Query(UploadQuery { f: name }): Query<UploadQuery>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<StatusCode, StatusCode> {
+    let id = state.upload_counter.fetch_add(1, Ordering::Relaxed);
+    let path = state.upload_path(id);
+    let mut f = File::create(&path).await.map_err(internal_error)?;
+    let mut reader = StreamReader::new(body.into_data_stream().map_err(io::Error::other));
+    let size_result = async {
+        let size = copy(&mut reader, &mut f).await?;
+        f.flush().await?;
+        Ok::<_, io::Error>(size)
     }
-
-    let name = req.query::<Query>()?.f;
-
-    let id;
-    let path;
-    {
-        let state = req.state();
-        id = state.upload_counter.fetch_add(1, Ordering::Relaxed);
-        path = state.upload_path(id);
-    }
-
-    let mut f = File::create(&path).await?;
-    let size_result = copy(&mut req, &mut f).await;
+    .await;
     drop(f);
     let size = match size_result {
         Ok(size) => size,
         Err(e) => {
             let _ = remove_file(path).await;
-            return Err(e.into());
+            return Err(internal_error(e));
         }
     };
 
-    let state = req.state();
+    let mime = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Mime>().ok())
+        .unwrap_or(APPLICATION_OCTET_STREAM)
+        .to_string();
     let snippet = Snippet::File {
         id,
         size,
         name,
-        mime: req.content_type().unwrap_or(BYTE_STREAM).to_string(),
+        mime,
     };
     state.push_snippet(snippet).await;
-    Ok(Response::new(StatusCode::Ok))
+    Ok(StatusCode::OK)
 }
 
-async fn respond_download(req: Request<State>) -> tide::Result<Response> {
-    let i = req.param::<usize>("i").map_err(client_err)?;
-    let state = req.state();
+async fn respond_download(
+    AppState(state): AppState<Arc<State>>,
+    Path(i): Path<usize>,
+) -> Result<impl IntoResponse, StatusCode> {
     let snippets = state.snippets.read().await;
-    let (id, size, name, mime) = match snippets.get(i) {
-        Some(Snippet::File {
-            id,
-            size,
-            name,
-            mime,
-        }) => (*id, *size, name, mime),
-        _ => return Ok(Response::new(StatusCode::NotFound)),
+    let Some(Snippet::File {
+        id,
+        size,
+        name,
+        mime,
+    }) = snippets.get(i)
+    else {
+        return Err(StatusCode::NOT_FOUND);
     };
-    let path = state.upload_path(id);
-    let reader = BufReader::new(File::open(path).await?);
-    let mut resp = Response::new(StatusCode::Ok);
-    resp.set_body(Body::from_reader(reader, size.try_into().ok()));
-    resp.insert_header(CONTENT_TYPE, &**mime);
-    resp.insert_header(
-        "Content-Disposition",
-        format!("attachment; filename=\"{}\"", name.replace('"', "\\\"")),
-    );
-    Ok(resp)
+    let file = File::open(state.upload_path(*id))
+        .await
+        .map_err(internal_error)?;
+    let headers = [
+        (CONTENT_LENGTH, size.to_string()),
+        (CONTENT_TYPE, mime.clone()),
+        (
+            CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", name.replace('"', "\\\"")),
+        ),
+    ];
+    Ok((headers, Body::from_stream(ReaderStream::new(file))))
 }
 
 fn get_server_addresses(address: SocketAddr) -> io::Result<Vec<String>> {
@@ -285,37 +313,39 @@ fn get_server_addresses(address: SocketAddr) -> io::Result<Vec<String>> {
     })
 }
 
-fn respond_ipaddrs(req: Request<State>) -> tide::Result<Response> {
-    let addresses = get_server_addresses(req.state().opt.address)?;
-    let mut resp = Response::new(StatusCode::Ok);
-    resp.set_body(Body::from_json(&addresses)?);
-    Ok(resp)
+async fn respond_ipaddrs(
+    AppState(state): AppState<Arc<State>>,
+) -> Result<Json<Vec<String>>, StatusCode> {
+    get_server_addresses(state.address)
+        .map(Json)
+        .map_err(internal_error)
 }
 
-async fn respond_qrcode(req: Request<State>) -> tide::Result<Response> {
-    #[derive(Deserialize)]
-    struct Query {
-        s: String,
-    }
+#[derive(Deserialize)]
+struct QrCodeQuery {
+    s: String,
+}
 
-    let input = req.query::<Query>()?.s;
-    let image = QrCode::with_error_correction_level(input, EcLevel::L)?
+async fn respond_qrcode(
+    Query(QrCodeQuery { s: input }): Query<QrCodeQuery>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let image = QrCode::with_error_correction_level(input, EcLevel::L)
+        .map_err(internal_error)?
         .render()
         .dark_color(Color("#eee"))
         .light_color(Color("transparent"))
         .quiet_zone(false)
         .build();
-    let mut resp = Response::new(StatusCode::Ok);
-    resp.set_body(image);
-    resp.set_content_type(SVG);
-    Ok(resp)
+    Ok(([(CONTENT_TYPE, "image/svg+xml")], image))
 }
 
-async fn snippet_update_monitor(req: Request<State>, sse_sender: sse::Sender) -> tide::Result<()> {
-    let dummy_mutex = Mutex::new(());
-    let mut dummy_guard = dummy_mutex.lock().await;
-    loop {
-        dummy_guard = req.state().snippets_updated.wait(dummy_guard).await;
-        sse_sender.send("updated", "1", None).await;
-    }
+async fn snippet_update_monitor(
+    AppState(state): AppState<Arc<State>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let updates = state.snippets_updated.subscribe();
+    Sse::new(stream::unfold(updates, |mut updates| async {
+        updates.changed().await.ok()?;
+        let event = Event::default().event("updated").data("1");
+        Some((Ok(event), updates))
+    }))
 }
